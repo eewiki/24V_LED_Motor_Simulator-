@@ -1,0 +1,120 @@
+// ATtiny85 Charlieplex: 10 LEDs with fade, 200Hz refresh, 1s per revolution
+// PB0..PB3 = Charlieplex pins, PB4 = direction input
+//
+// Arduino Uno to ATTiny85 Connections 
+//
+// Arduino 5V connects to ATTiny85 Pin 8 (Vcc)
+// Arduino GND connects to ATTiny85 Pin 4 (GND)
+// Arduino Pin 13 connects to ATTiny85 Pin 7 (SCK)
+// Arduino Pin 12 connects to ATTiny85 Pin 6 (MISO)
+// Arduino Pin 11 connects to ATTiny85 Pin 5 (MOSI)
+// Arduino Pin 10 connects to ATTiny85 Pin 1 (Slave Reset)
+//
+// Step 1: Tools → Board → ATtiny25/45/85
+// Step 2: Tools → Processor → ATtiny85
+// Step 3: Tools → Clock → 8 MHz (internal)
+// Step 4: Tools → Programmer → your programmer (e.g. Arduino as ISP)
+// Step 5: Tools → Burn Bootloader
+// Step 6: Hit Upload
+//
+// This version assumes ATtiny85 runs at 8 MHz (CKDIV8 fuse cleared).
+// Interrupt-free, library-free software PWM / fade
+// Main LED 50% duty, trailing LEDs fade out smoothly in ~200ms
+// One full cycle around 10 LEDs = 1 second
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+// -----------------------------------------------------------------------------
+// Charlieplex wiring
+// -----------------------------------------------------------------------------
+const uint8_t pins[] = {0,1,2,3};          // PB0–PB3 used for Charlieplexing
+
+struct Pair { uint8_t hi, lo; };           // LED defined by hi (anode), lo (cathode)
+Pair leds[10] = {                           // 10 LED connections
+  {0,1},{1,0},{0,2},{2,0},{0,3},{3,0},
+  {1,2},{2,1},{1,3},{3,1}
+};
+
+// -----------------------------------------------------------------------------
+// LED state variables
+// -----------------------------------------------------------------------------
+volatile uint8_t brightness[10];           // fade levels (0–255) for trailing LEDs
+volatile uint8_t currentLed = 0;           // index of the currently "main" LED
+unsigned long lastStep = 0;                // timestamp for rotation steps
+
+// -----------------------------------------------------------------------------
+// Utility functions
+// -----------------------------------------------------------------------------
+void allHiZ() {                            // set all Charlieplex pins to high-impedance
+  for(uint8_t i=0;i<4;i++){
+    pinMode(pins[i], INPUT);               // input = high impedance
+    digitalWrite(pins[i], LOW);            // ensure pull-ups off
+  }
+}
+
+void IndexedLED(uint8_t i){                // turn on one LED
+  allHiZ();                                // release all pins first
+  pinMode(leds[i].hi, OUTPUT);             // anode pin
+  pinMode(leds[i].lo, OUTPUT);             // cathode pin
+  digitalWrite(leds[i].hi, HIGH);          // anode HIGH
+  digitalWrite(leds[i].lo, LOW);           // cathode LOW
+}
+
+// -----------------------------------------------------------------------------
+// Ultra-optimized software PWM cycle with main LED 50% duty + trailing fade
+// -----------------------------------------------------------------------------
+void pwmCycle(){
+  const uint8_t slices = 10;               // divide 2.5 ms into 10 slices (~250µs each)
+
+  for(uint8_t slice=0;slice<slices;slice++){
+    // Phase for main LED: 50% duty → first 5 slices ON
+    if(slice < slices/2) IndexedLED(currentLed);
+    else allHiZ();                          // main LED off for second half
+
+    // Phase for trailing LEDs: fade proportional to brightness
+    for(uint8_t n=0;n<10;n++){
+      if(n==currentLed) continue;           // skip main LED
+      uint8_t threshold = (brightness[n]*slices)/255;  // map brightness 0–255 → slices
+      if(slice < threshold) IndexedLED(n);    // LED on during this slice
+    }
+
+    delayMicroseconds(250);                 // duration of one slice
+    allHiZ();                               // clear all LEDs before next slice
+
+    // Fade trailing LEDs gradually (~200ms total)
+    for(uint8_t i=0;i<10;i++){
+      if(i==currentLed) continue;           // main LED stays bright
+      if(brightness[i]>0) brightness[i] = (brightness[i]>3)?brightness[i]-3:0;
+    }
+  }
+}
+// -----------------------------------------------------------------------------
+// Setup
+// -----------------------------------------------------------------------------
+void setup(){
+  allHiZ();                                // release all pins
+  for(int i=0;i<10;i++) brightness[i]=0;   // initialize fade buffer
+  pinMode(4, INPUT);                       // PB4 = direction input
+}
+// -----------------------------------------------------------------------------
+// Main loop
+// -----------------------------------------------------------------------------
+void loop(){
+  unsigned long now = millis();
+
+  // Step every 100 ms → 1 s per cycle of 10 LEDs
+  if(now - lastStep >= 100){
+    brightness[currentLed] = 255;          // reset main LED fade
+
+    // Direction control via PB4 input
+    if(digitalRead(4)==HIGH){              // if PB4 high → reverse
+      currentLed = (currentLed==0)?9:currentLed-1;
+    } else {                               // forward otherwise
+      currentLed = (currentLed+1)%10;
+    }
+    lastStep = now;                         // update last step timestamp
+  }
+
+  pwmCycle();                                // run software PWM + fading
+}
